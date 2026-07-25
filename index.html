@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bevy Platformer</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #1a1a1a;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            width: 100vw;
+            height: 100vh;
+            font-family: sans-serif;
+            color: #fff;
+        }
+        canvas {
+            display: block;
+            outline: none;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <script type="module">
+        import init from './game.js';
+        
+        // Hide scrollbars and prevent default touch/key gestures in browser
+        window.addEventListener("keydown", (e) => {
+            if (["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.code)) {
+                e.preventDefault();
+            }
+        });
+
+        init().catch((error) => {
+            if (!error.message.startsWith("Using exceptions for control flow,")) {
+                throw error;
+            }
+        });
+    </script>
+</body>
+</html>

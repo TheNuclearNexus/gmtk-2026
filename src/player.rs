@@ -224,7 +224,7 @@ pub fn blast_update_system(
     }
 }
 
-/// Render player ship, blasts, dotted targeting lines, and post-shot launch arrows using Bevy Gizmos
+/// Render player ship, blasts, dotted targeting lines, and centered post-shot launch arrows using Bevy Gizmos
 pub fn gizmo_render_system(
     mut gizmos: Gizmos,
     windows: Query<&Window>,
@@ -258,7 +258,7 @@ pub fn gizmo_render_system(
         gizmos.line_2d(left_wing, right_wing, color);
         gizmos.line_2d(right_wing, tip, color);
 
-        // 2. Post-shot Movement Arrow (shows direction ship will move after firing)
+        // 2. Extended Dotted Launch Trajectory Arrow centered directly on ship nose tip
         let launch_dir = if let Some(orbit) = in_orbit {
             Vec2::new(-orbit.angle.sin(), orbit.angle.cos()) * orbit.angular_velocity.signum()
         } else if let Some(target) = cursor_world {
@@ -268,18 +268,31 @@ pub fn gizmo_render_system(
             forward
         };
 
-        let arrow_start = pos + launch_dir * 8.0;
-        let arrow_end = pos + launch_dir * 26.0;
+        let arrow_start = tip; // Starts directly at nose tip
+        let total_arrow_dist = 56.0; // Extends farther
+        let arrow_end = arrow_start + launch_dir * total_arrow_dist;
         let arrow_right = Vec2::new(-launch_dir.y, launch_dir.x);
+        let launch_color = LinearRgba::rgb(0.2, 1.0, 0.7);
 
-        // Arrow main shaft
-        gizmos.line_2d(arrow_start, arrow_end, LinearRgba::rgb(0.2, 1.0, 0.7));
+        // Draw dotted launch line from ship nose tip
+        let dash_len = 4.0;
+        let gap_len = 3.0;
+        let step = dash_len + gap_len;
+        let mut d = 0.0;
 
-        // Arrowhead left & right fins
-        let fin_left = arrow_end - launch_dir * 5.0 + arrow_right * 3.5;
-        let fin_right = arrow_end - launch_dir * 5.0 - arrow_right * 3.5;
-        gizmos.line_2d(arrow_end, fin_left, LinearRgba::rgb(0.2, 1.0, 0.7));
-        gizmos.line_2d(arrow_end, fin_right, LinearRgba::rgb(0.2, 1.0, 0.7));
+        while d < total_arrow_dist {
+            let d_end = (d + dash_len).min(total_arrow_dist);
+            let p1 = arrow_start + launch_dir * d;
+            let p2 = arrow_start + launch_dir * d_end;
+            gizmos.line_2d(p1, p2, launch_color);
+            d += step;
+        }
+
+        // Arrowhead left & right fins at the end of the extended dotted line
+        let fin_left = arrow_end - launch_dir * 6.0 + arrow_right * 4.0;
+        let fin_right = arrow_end - launch_dir * 6.0 - arrow_right * 4.0;
+        gizmos.line_2d(arrow_end, fin_left, launch_color);
+        gizmos.line_2d(arrow_end, fin_right, launch_color);
 
         // 3. Dotted Targeting Line towards cursor while in free flight
         if in_orbit.is_none() {
@@ -288,17 +301,15 @@ pub fn gizmo_render_system(
                 let total_dist = to_target.length();
                 if total_dist > 4.0 {
                     let dir = to_target / total_dist;
-                    let dash_len = 4.0;
-                    let gap_len = 3.0;
                     let step = dash_len + gap_len;
-                    let mut d = 6.0;
+                    let mut d_target = 6.0;
 
-                    while d < total_dist {
-                        let d_end = (d + dash_len).min(total_dist);
-                        let p1 = pos + dir * d;
+                    while d_target < total_dist {
+                        let d_end = (d_target + dash_len).min(total_dist);
+                        let p1 = pos + dir * d_target;
                         let p2 = pos + dir * d_end;
                         gizmos.line_2d(p1, p2, LinearRgba::rgb(1.0, 0.35, 0.2));
-                        d += step;
+                        d_target += step;
                     }
                 }
             }
