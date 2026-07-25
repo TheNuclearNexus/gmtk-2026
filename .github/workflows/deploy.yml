@@ -46,7 +46,7 @@ jobs:
       - name: Run wasm-bindgen
         run: |
           mkdir -p dist
-          wasm-bindgen --out-dir dist --target web target/wasm32-unknown-unknown/release/game.wasm
+          wasm-bindgen --out-dir dist --target web target/wasm32-unknown-unknown/release/gmtk-2026.wasm
 
       - name: Copy Assets and HTML
         run: |
