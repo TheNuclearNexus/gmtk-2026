@@ -97,7 +97,7 @@ pub fn player_steering_system(
         transform.translation.y += forward.y * player.current_speed * dt;
 
         // Gradually bleed off high slingshot launch speed back to base cruising speed
-        player.current_speed = (player.current_speed - 30.0 * dt).max(player.base_speed);
+        player.current_speed = (player.current_speed - 25.0 * dt).max(player.base_speed);
 
         // Keep player bounded within extended level boundaries (-260 to 260)
         transform.translation.x = transform.translation.x.clamp(-260.0, 260.0);
@@ -105,7 +105,7 @@ pub fn player_steering_system(
     }
 }
 
-/// Handles free flight recoil shooting and orbital tangential ejection blast
+/// Handles blast shooting AWAY from cursor, propelling ship TOWARDS cursor
 pub fn player_shooting_system(
     mut commands: Commands,
     mouse_input: Res<ButtonInput<MouseButton>>,
@@ -128,77 +128,64 @@ pub fn player_shooting_system(
         player.ammo -= 1;
         let player_pos = transform.translation.truncate();
 
+        // Direction towards cursor (ship launch direction)
+        let cursor_dir = if let Some(target) = cursor_world {
+            let dir = (target - player_pos).normalize_or_zero();
+            if dir == Vec2::ZERO {
+                let z = transform.rotation.to_euler(EulerRot::ZYX).0 - player.tilt;
+                Vec2::new(-z.sin(), z.cos())
+            } else {
+                dir
+            }
+        } else {
+            let z = transform.rotation.to_euler(EulerRot::ZYX).0 - player.tilt;
+            Vec2::new(-z.sin(), z.cos())
+        };
+
+        let ship_launch_dir = cursor_dir;
+        let projectile_dir = -cursor_dir; // Projectile fires AWAY from cursor
+
         if let Some(orbit) = in_orbit {
-            // Orbital blast is unaffected by pointer: ship launches 100% tangentially along orbital heading
-            let orbital_linear_speed = (orbit.angular_velocity.abs() * orbit.radius).max(player.base_speed);
-            let launch_speed = (orbital_linear_speed * 0.85).max(player.base_speed);
+            let current_orbital_speed = (orbit.angular_momentum / orbit.radius.max(1.0)).abs();
+            let orbit_dir = Vec2::new(-orbit.angle.sin(), orbit.angle.cos()) * orbit.angular_momentum.signum();
+
+            // Alignment reward: Launching aligned with orbital movement direction gives up to 2.2x speed boost!
+            let alignment = ship_launch_dir.dot(orbit_dir).max(0.0);
+            let boost_multiplier = 1.0 + 1.2 * alignment;
+            let launch_speed = (current_orbital_speed * boost_multiplier).clamp(player.base_speed, 420.0);
 
             player.current_speed = launch_speed;
             player.disabled_gravity_body = Some(orbit.body_entity);
             commands.entity(player_entity).remove::<InOrbit>();
-
-            // Ship's exact tangential movement heading vector while in orbit
-            let ship_tangent_heading = Vec2::new(-orbit.angle.sin(), orbit.angle.cos()) * orbit.angular_velocity.signum();
-            let ship_rotation_angle = ship_tangent_heading.y.atan2(ship_tangent_heading.x) - std::f32::consts::FRAC_PI_2;
-
-            // Orient ship strictly in its orbital tangent heading direction
-            transform.rotation = Quat::from_rotation_z(ship_rotation_angle);
-
-            // Spawn Blast projectile traveling forward along orbital tangent heading
-            commands.spawn((
-                Transform::from_translation(transform.translation),
-                Blast {
-                    timer: Timer::from_seconds(1.2, TimerMode::Once),
-                    velocity: ship_tangent_heading * (launch_speed + 140.0),
-                },
-            ));
-
-            // Nudge ship forward along tangent heading to break orbit capture
-            transform.translation += ship_tangent_heading.extend(0.0) * 12.0;
         } else {
-            // Free flight blasting: ship turns away from cursor, blast fires out the back toward cursor
-            let cursor_dir = if let Some(target) = cursor_world {
-                let dir = (target - player_pos).normalize_or_zero();
-                if dir == Vec2::ZERO {
-                    let z = transform.rotation.to_euler(EulerRot::ZYX).0 - player.tilt;
-                    Vec2::new(-z.sin(), z.cos())
-                } else {
-                    dir
-                }
-            } else {
-                let z = transform.rotation.to_euler(EulerRot::ZYX).0 - player.tilt;
-                Vec2::new(-z.sin(), z.cos())
-            };
+            // Free flight: preserve speed with light penalty
+            let launch_speed = (player.current_speed * 0.9).max(player.base_speed);
+            player.current_speed = launch_speed;
+        }
 
-            // Preserve free flight speed with 15% penalty
-            let penalized_speed = (player.current_speed * 0.85).max(player.base_speed);
-            player.current_speed = penalized_speed;
+        // Orient ship facing towards launch direction (towards cursor)
+        let ship_rotation_angle = ship_launch_dir.y.atan2(ship_launch_dir.x) - std::f32::consts::FRAC_PI_2;
+        transform.rotation = Quat::from_rotation_z(ship_rotation_angle);
 
-            // Recoil direction: Ship turns and launches AWAY from cursor (-cursor_dir)
-            let recoil_dir = -cursor_dir;
-            let ship_rotation_angle = recoil_dir.y.atan2(recoil_dir.x) - std::f32::consts::FRAC_PI_2;
-            transform.rotation = Quat::from_rotation_z(ship_rotation_angle);
+        // Spawn Blast projectile traveling AWAY from cursor out of the rear of the ship
+        let blast_spawn_pos = (player_pos + projectile_dir * 10.0).extend(transform.translation.z);
+        commands.spawn((
+            Transform::from_translation(blast_spawn_pos),
+            Blast {
+                timer: Timer::from_seconds(1.2, TimerMode::Once),
+                velocity: projectile_dir * (player.current_speed + 150.0),
+            },
+        ));
 
-            // Spawn Blast projectile out of the BACK of the ship traveling toward cursor
-            let blast_spawn_pos = (player_pos - recoil_dir * 8.0).extend(transform.translation.z);
-            commands.spawn((
-                Transform::from_translation(blast_spawn_pos),
-                Blast {
-                    timer: Timer::from_seconds(1.2, TimerMode::Once),
-                    velocity: cursor_dir * (penalized_speed + 140.0),
-                },
-            ));
+        // Propel ship forward towards cursor
+        transform.translation += ship_launch_dir.extend(0.0) * 12.0;
 
-            // Nudge ship forward in recoil direction
-            transform.translation += recoil_dir.extend(0.0) * 12.0;
-
-            // If near a planet, disable its gravity pull until player leaves pull radius
-            for (body_entity, body_transform, body_data) in bodies_q.iter() {
-                let dist = player_pos.distance(body_transform.translation.truncate());
-                if dist <= body_data.pull_radius {
-                    player.disabled_gravity_body = Some(body_entity);
-                    break;
-                }
+        // If near a planet, disable its gravity pull until player leaves pull radius
+        for (body_entity, body_transform, body_data) in bodies_q.iter() {
+            let dist = player_pos.distance(body_transform.translation.truncate());
+            if dist <= body_data.pull_radius {
+                player.disabled_gravity_body = Some(body_entity);
+                break;
             }
         }
     }
@@ -224,7 +211,7 @@ pub fn blast_update_system(
     }
 }
 
-/// Render player ship, blasts, dotted targeting lines, and centered post-shot launch arrows using Bevy Gizmos
+/// Render player ship, blasts, screen-length rear orange firing lines, and clean non-intersecting forward launch arrows
 pub fn gizmo_render_system(
     mut gizmos: Gizmos,
     windows: Query<&Window>,
@@ -241,10 +228,11 @@ pub fn gizmo_render_system(
         let forward = (transform.rotation * Vec3::Y).truncate();
         let right = (transform.rotation * Vec3::X).truncate();
 
-        // 1. Draw Player Spacecraft Triangle centered on transform origin
+        // 1. Draw Player Spacecraft Triangle centered on transform origin (pos)
         let tip = pos + forward * 7.0;
-        let left_wing = pos - forward * 7.0 - right * 5.0;
-        let right_wing = pos - forward * 7.0 + right * 5.0;
+        let rear = pos - forward * 7.0;
+        let left_wing = rear - right * 5.0;
+        let right_wing = rear + right * 5.0;
 
         let color = if in_orbit.is_some() {
             LinearRgba::rgb(0.2, 0.9, 1.0)
@@ -258,61 +246,52 @@ pub fn gizmo_render_system(
         gizmos.line_2d(left_wing, right_wing, color);
         gizmos.line_2d(right_wing, tip, color);
 
-        // 2. Extended Dotted Launch Trajectory Arrow centered directly on ship nose tip
-        let launch_dir = if let Some(orbit) = in_orbit {
-            Vec2::new(-orbit.angle.sin(), orbit.angle.cos()) * orbit.angular_velocity.signum()
-        } else if let Some(target) = cursor_world {
-            let cursor_dir = (target - pos).normalize_or_zero();
-            if cursor_dir != Vec2::ZERO { -cursor_dir } else { forward }
+        // 2. Trajectory Launch Arrow (towards cursor, skipping ship body)
+        let launch_dir = if let Some(target) = cursor_world {
+            let dir = (target - pos).normalize_or_zero();
+            if dir != Vec2::ZERO { dir } else { forward }
         } else {
             forward
         };
 
-        let arrow_start = tip; // Starts directly at nose tip
-        let total_arrow_dist = 56.0; // Extends farther
-        let arrow_end = arrow_start + launch_dir * total_arrow_dist;
+        let ship_radius_offset = 10.0; // Skip ship geometry visually
+        let total_arrow_dist = 28.0;   // Shorter arrow
+        let arrow_end = pos + launch_dir * total_arrow_dist;
         let arrow_right = Vec2::new(-launch_dir.y, launch_dir.x);
         let launch_color = LinearRgba::rgb(0.2, 1.0, 0.7);
 
-        // Draw dotted launch line from ship nose tip
+        // Draw dotted launch line skipping ship body
         let dash_len = 4.0;
         let gap_len = 3.0;
         let step = dash_len + gap_len;
-        let mut d = 0.0;
+        let mut d = ship_radius_offset;
 
         while d < total_arrow_dist {
             let d_end = (d + dash_len).min(total_arrow_dist);
-            let p1 = arrow_start + launch_dir * d;
-            let p2 = arrow_start + launch_dir * d_end;
+            let p1 = pos + launch_dir * d;
+            let p2 = pos + launch_dir * d_end;
             gizmos.line_2d(p1, p2, launch_color);
             d += step;
         }
 
-        // Arrowhead left & right fins at the end of the extended dotted line
-        let fin_left = arrow_end - launch_dir * 6.0 + arrow_right * 4.0;
-        let fin_right = arrow_end - launch_dir * 6.0 - arrow_right * 4.0;
+        // Arrowhead fins at the end of forward launch line
+        let fin_left = arrow_end - launch_dir * 5.0 + arrow_right * 3.5;
+        let fin_right = arrow_end - launch_dir * 5.0 - arrow_right * 3.5;
         gizmos.line_2d(arrow_end, fin_left, launch_color);
         gizmos.line_2d(arrow_end, fin_right, launch_color);
 
-        // 3. Dotted Targeting Line towards cursor while in free flight
-        if in_orbit.is_none() {
-            if let Some(target) = cursor_world {
-                let to_target = target - pos;
-                let total_dist = to_target.length();
-                if total_dist > 4.0 {
-                    let dir = to_target / total_dist;
-                    let step = dash_len + gap_len;
-                    let mut d_target = 6.0;
+        // 3. Orange Dotted Rear Line (skipping ship body, extending away from cursor: 320 units)
+        let rear_dir = -launch_dir; // Away from cursor where blast fires
+        let total_rear_dist = 320.0; // Extends to edge of screen
+        let mut d_rear = ship_radius_offset; // Starts outside ship body
+        let orange_color = LinearRgba::rgb(1.0, 0.35, 0.2);
 
-                    while d_target < total_dist {
-                        let d_end = (d_target + dash_len).min(total_dist);
-                        let p1 = pos + dir * d_target;
-                        let p2 = pos + dir * d_end;
-                        gizmos.line_2d(p1, p2, LinearRgba::rgb(1.0, 0.35, 0.2));
-                        d_target += step;
-                    }
-                }
-            }
+        while d_rear < total_rear_dist {
+            let d_end = (d_rear + dash_len).min(total_rear_dist);
+            let p1 = pos + rear_dir * d_rear;
+            let p2 = pos + rear_dir * d_end;
+            gizmos.line_2d(p1, p2, orange_color);
+            d_rear += step;
         }
     }
 

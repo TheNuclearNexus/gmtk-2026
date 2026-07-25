@@ -68,8 +68,8 @@ pub struct InOrbit {
     pub body_entity: Entity,
     pub radius: f32,
     pub angle: f32,
-    pub angular_velocity: f32,
-    pub decay_rate: f32,
+    pub angular_momentum: f32, // L = r * v_tangential (conserved)
+    pub radial_velocity: f32,  // dr/dt
 }
 
 #[derive(Component)]

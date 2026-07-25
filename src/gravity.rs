@@ -43,7 +43,7 @@ pub fn gravity_immunity_check_system(
     }
 }
 
-/// System to detect when player enters gravitational pull radius and retains incoming velocity for slingshotting
+/// System to detect when player enters gravitational pull radius and retains full momentum for conservation of angular momentum
 pub fn orbit_entry_system(
     mut commands: Commands,
     player_q: Query<(Entity, &Transform, &Player), Without<InOrbit>>,
@@ -69,25 +69,28 @@ pub fn orbit_entry_system(
             if distance <= body_data.pull_radius && distance > body_data.body_radius {
                 let to_body = (body_pos - player_pos).normalize_or_zero();
 
-                // Tangency check: dot product with radial vector must be small (|dot| <= 0.40)
+                // Tangency check: dot product with radial vector must be small (|dot| <= 0.45) to capture into orbit
                 let radial_dot = player_heading.dot(to_body).abs();
 
-                if radial_dot <= 0.40 {
+                if radial_dot <= 0.45 {
                     let diff = player_pos - body_pos;
                     let angle = diff.y.atan2(diff.x);
-
+                    let radial_unit = diff.normalize_or_zero();
                     let tangent_ccw = Vec2::new(-angle.sin(), angle.cos());
 
-                    // Calculate initial angular velocity derived directly from incoming linear velocity (v_tan / radius)
-                    let v_tangential = player_heading.dot(tangent_ccw) * player.current_speed;
-                    let initial_angular_velocity = v_tangential / distance.max(10.0);
+                    let v_in = player_heading * player.current_speed;
+                    let v_tan = v_in.dot(tangent_ccw);
+                    let v_rad = v_in.dot(radial_unit);
+
+                    // Conserved angular momentum L = r * v_tan
+                    let angular_momentum = distance * v_tan;
 
                     commands.entity(player_entity).insert(InOrbit {
                         body_entity,
                         radius: distance,
                         angle,
-                        angular_velocity: initial_angular_velocity,
-                        decay_rate: 10.0,
+                        angular_momentum,
+                        radial_velocity: v_rad,
                     });
 
                     break;
@@ -97,76 +100,81 @@ pub fn orbit_entry_system(
     }
 }
 
-/// Controls orbital movement, radius decay towards planet, smooth rotation alignment, and directional A/D orbital speed controls
+/// Controls orbital physics based on Conservation of Angular Momentum (L = r * v_tan = const)
+/// Steering (A/D) adjusts radial position: approaching center speeds up orbit, moving outward slows down
 pub fn orbital_movement_system(
+    mut commands: Commands,
     keyboard_input: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
-    mut player_q: Query<(&mut Transform, &mut Player, &mut InOrbit)>,
-    bodies_q: Query<&Transform, (With<GravitationalBody>, Without<Player>)>,
+    mut player_q: Query<(Entity, &mut Transform, &mut Player, &mut InOrbit)>,
+    bodies_q: Query<(&Transform, &GravitationalBody), Without<Player>>,
 ) {
     let dt = time.delta_secs();
 
-    for (mut player_transform, mut player, mut orbit) in player_q.iter_mut() {
-        if let Ok(body_transform) = bodies_q.get(orbit.body_entity) {
+    for (player_entity, mut player_transform, mut player, mut orbit) in player_q.iter_mut() {
+        if let Ok((body_transform, body_data)) = bodies_q.get(orbit.body_entity) {
             let body_pos = body_transform.translation.truncate();
-            let orbit_dir = orbit.angular_velocity.signum();
 
-            let mut accel = 0.0;
+            // A / D steering turns the ship
+            let mut rotation_amount = 0.0;
             let mut target_tilt = 0.0;
 
-            if orbit_dir >= 0.0 {
-                // Counter-Clockwise (CCW): Planet is to the left
-                // A (towards planet) accelerates, D (away from planet) decelerates
-                if keyboard_input.pressed(KeyCode::KeyA) {
-                    accel += 3.5;
-                    target_tilt += 0.35;
-                }
-                if keyboard_input.pressed(KeyCode::KeyD) {
-                    accel -= 3.5;
-                    target_tilt -= 0.35;
-                }
-            } else {
-                // Clockwise (CW): Planet is to the right
-                // D (towards planet) accelerates, A (away from planet) decelerates
-                if keyboard_input.pressed(KeyCode::KeyD) {
-                    accel -= 3.5; // Increases negative magnitude (accelerates CW)
-                    target_tilt -= 0.35;
-                }
-                if keyboard_input.pressed(KeyCode::KeyA) {
-                    accel += 3.5; // Decreases negative magnitude (decelerates CW)
-                    target_tilt += 0.35;
-                }
+            if keyboard_input.pressed(KeyCode::KeyA) {
+                rotation_amount += player.turn_speed * dt;
+                target_tilt += 0.35;
+            }
+            if keyboard_input.pressed(KeyCode::KeyD) {
+                rotation_amount -= player.turn_speed * dt;
+                target_tilt -= 0.35;
             }
 
-            // Interpolate visual tilt smoothly
+            // Smooth visual tilt
             player.tilt += (target_tilt - player.tilt) * (12.0 * dt).min(1.0);
 
-            orbit.angular_velocity += accel * dt;
+            // Extract heading rotation
+            let current_z = player_transform.rotation.to_euler(EulerRot::ZYX).0;
+            let base_heading = current_z - player.tilt + rotation_amount;
+            player_transform.rotation = Quat::from_rotation_z(base_heading + player.tilt);
 
-            // Preserve orbit direction: never stop (0.0) or reverse direction!
-            if orbit_dir >= 0.0 {
-                orbit.angular_velocity = orbit.angular_velocity.clamp(1.2, 8.0);
-            } else {
-                orbit.angular_velocity = orbit.angular_velocity.clamp(-8.0, -1.2);
-            }
+            // Ship facing vector
+            let ship_facing = Vec2::new(-base_heading.sin(), base_heading.cos());
 
-            // Move player closer to planet over time (radius decay)
-            orbit.radius -= orbit.decay_rate * dt;
+            // Radial direction pointing outward from planet
+            let radial_out = Vec2::new(orbit.angle.cos(), orbit.angle.sin());
+
+            // Radial facing component (facing outward > 0, facing inward < 0)
+            let radial_facing = ship_facing.dot(radial_out);
+
+            // Adjust radial velocity based on ship facing direction
+            orbit.radial_velocity += radial_facing * 50.0 * dt;
+            // Slight natural orbital decay towards center
+            orbit.radial_velocity -= 8.0 * dt;
+            // Damp radial velocity for smooth control
+            orbit.radial_velocity *= 1.0 - (1.2 * dt).min(0.9);
+
+            // Update orbital radius
+            orbit.radius += orbit.radial_velocity * dt;
+            orbit.radius = orbit.radius.max(body_data.body_radius + 2.0);
+
+            // Conservation of Angular Momentum: v_tan = L / r, angular_velocity = L / (r^2)
+            let angular_velocity = orbit.angular_momentum / (orbit.radius * orbit.radius).max(1.0);
+
+            // Update linear speed property (v_tan)
+            let current_tan_speed = (orbit.angular_momentum / orbit.radius.max(1.0)).abs();
+            player.current_speed = current_tan_speed;
 
             // Update angle
-            orbit.angle += orbit.angular_velocity * dt;
+            orbit.angle += angular_velocity * dt;
 
-            // Update player position seamlessly on orbit circle
+            // Update player 2D position
             let new_pos = body_pos + Vec2::new(orbit.angle.cos(), orbit.angle.sin()) * orbit.radius;
             player_transform.translation.x = new_pos.x;
             player_transform.translation.y = new_pos.y;
 
-            // Target orbital tangent vector
-            let move_dir = Vec2::new(-orbit.angle.sin(), orbit.angle.cos()) * orbit_dir;
-
-            // Calculate ship rotation angle matching orbital tangent heading + visual tilt
-            let ship_rotation_angle = move_dir.y.atan2(move_dir.x) - std::f32::consts::FRAC_PI_2;
-            player_transform.rotation = Quat::from_rotation_z(ship_rotation_angle + player.tilt);
+            // If player steers outward past pull radius, gracefully release from orbit
+            if orbit.radius >= body_data.pull_radius {
+                commands.entity(player_entity).remove::<InOrbit>();
+            }
         }
     }
 }
