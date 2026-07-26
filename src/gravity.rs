@@ -82,6 +82,9 @@ pub fn orbit_entry_system(
                     let v_tan = v_in.dot(tangent_ccw);
                     let v_rad = v_in.dot(radial_unit);
 
+                    // Clamp initial inward radial velocity so high approach speeds don't crash into planet surface
+                    let initial_radial_vel = v_rad.clamp(-10.0, 20.0);
+
                     // Conserved angular momentum L = r * v_tan
                     let angular_momentum = distance * v_tan;
 
@@ -90,7 +93,7 @@ pub fn orbit_entry_system(
                         radius: distance,
                         angle,
                         angular_momentum,
-                        radial_velocity: v_rad,
+                        radial_velocity: initial_radial_vel,
                     });
 
                     break;
@@ -158,16 +161,16 @@ pub fn orbital_movement_system(
             // Radial facing component (facing outward > 0, facing inward < 0)
             let radial_facing = ship_facing.dot(radial_out);
 
-            // Adjust radial velocity based on ship facing direction
-            orbit.radial_velocity += radial_facing * 50.0 * dt;
-            // Slight natural orbital decay towards center
-            orbit.radial_velocity -= 8.0 * dt;
-            // Damp radial velocity for smooth control
-            orbit.radial_velocity *= 1.0 - (1.2 * dt).min(0.9);
+            // Symmetric, responsive radial steering based on ship orientation (facing inward dives inward & speeds up, facing outward expands & slows down)
+            let steering_strength = 60.0;
+            orbit.radial_velocity += radial_facing * steering_strength * dt;
+
+            // Gentle radial velocity damping so steering feels responsive yet smooth
+            orbit.radial_velocity *= 1.0 - (2.0 * dt).min(0.9);
 
             // Update orbital radius
             orbit.radius += orbit.radial_velocity * dt;
-            orbit.radius = orbit.radius.max(body_data.body_radius + 2.0);
+            orbit.radius = orbit.radius.clamp(body_data.body_radius + 10.0, body_data.pull_radius);
 
             // Conservation of Angular Momentum: v_tan = L / r, angular_velocity = L / (r^2)
             let angular_velocity = orbit.angular_momentum / (orbit.radius * orbit.radius).max(1.0);
@@ -212,9 +215,10 @@ pub fn gravity_pull_system(
             let to_body = body_pos - player_pos;
             let dist = to_body.length();
 
-            if dist > 0.0 && dist <= body_data.pull_radius * 1.5 {
+            if dist > 0.0 && dist <= body_data.pull_radius {
                 let dir = to_body.normalize();
-                let pull_strength = (body_data.gravity_force / (dist * 0.1).max(1.0)).min(120.0);
+                let pull_factor = 1.0 - (dist / body_data.pull_radius).clamp(0.0, 1.0);
+                let pull_strength = body_data.gravity_force * pull_factor;
                 player_transform.translation.x += dir.x * pull_strength * dt;
                 player_transform.translation.y += dir.y * pull_strength * dt;
             }
@@ -235,8 +239,8 @@ pub fn orbit_collision_system(
             let body_pos = body_transform.translation.truncate();
             let dist = player_pos.distance(body_pos);
 
-            // Crash condition
-            if dist <= body_data.body_radius + 4.0 {
+            // Crash condition (matches 25x25 ship texture hitbox bounds)
+            if dist <= body_data.body_radius + 10.0 {
                 next_state.set(GameState::GameOver);
                 return;
             }

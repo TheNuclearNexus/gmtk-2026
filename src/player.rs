@@ -12,16 +12,15 @@ impl Plugin for PlayerPlugin {
                 player_steering_system,
                 player_shooting_system,
                 blast_update_system,
-                gizmo_render_system,
             )
                 .run_if(in_state(GameState::Playing)),
         );
 
-        // Anti-jitter: camera tracking runs in PostUpdate schedule after all movement systems
-        // using frame-rate independent exponential smoothing.
+        // Anti-jitter: reticle moves in PostUpdate right before camera follow system
         app.add_systems(
             PostUpdate,
-            camera_follow_system
+            (update_aim_reticle_system, camera_follow_system)
+                .chain()
                 .run_if(in_state(GameState::Playing)),
         );
     }
@@ -97,17 +96,15 @@ pub fn player_steering_system(
         transform.translation.y += forward.y * player.current_speed * dt;
 
         // Gradually bleed off high slingshot launch speed back to base cruising speed
-        player.current_speed = (player.current_speed - 25.0 * dt).max(player.base_speed);
-
-        // Keep player bounded within extended level boundaries (-260 to 260)
-        transform.translation.x = transform.translation.x.clamp(-260.0, 260.0);
-        transform.translation.y = transform.translation.y.clamp(-260.0, 260.0);
+        player.current_speed = (player.current_speed - 20.0 * dt).max(player.base_speed);
     }
 }
 
 /// Handles blast shooting AWAY from cursor, propelling ship TOWARDS cursor
 pub fn player_shooting_system(
     mut commands: Commands,
+    mut circle_assets: ResMut<CircleAssets>,
+    mut images: ResMut<Assets<Image>>,
     mouse_input: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform)>,
@@ -119,6 +116,7 @@ pub fn player_shooting_system(
     }
 
     let cursor_world = get_cursor_world_pos(&windows, &camera_q);
+    let blast_img = circle_assets.get_or_create(&mut images, 3, Palette::CRIMSON);
 
     for (player_entity, mut transform, mut player, in_orbit) in player_q.iter_mut() {
         if player.ammo == 0 {
@@ -152,14 +150,14 @@ pub fn player_shooting_system(
             // Alignment reward: Launching aligned with orbital movement direction gives up to 2.2x speed boost!
             let alignment = ship_launch_dir.dot(orbit_dir).max(0.0);
             let boost_multiplier = 1.0 + 1.2 * alignment;
-            let launch_speed = (current_orbital_speed * boost_multiplier).clamp(player.base_speed, 420.0);
+            let launch_speed = (current_orbital_speed * boost_multiplier).clamp(player.base_speed, 480.0);
 
             player.current_speed = launch_speed;
             player.disabled_gravity_body = Some(orbit.body_entity);
             commands.entity(player_entity).remove::<InOrbit>();
         } else {
-            // Free flight: preserve speed with light penalty
-            let launch_speed = (player.current_speed * 0.9).max(player.base_speed);
+            // Free flight: blast provides immediate +50.0 speed boost!
+            let launch_speed = (player.current_speed + 50.0).clamp(player.base_speed, 480.0);
             player.current_speed = launch_speed;
         }
 
@@ -171,6 +169,10 @@ pub fn player_shooting_system(
         let blast_spawn_pos = (player_pos + projectile_dir * 10.0).extend(transform.translation.z);
         commands.spawn((
             Transform::from_translation(blast_spawn_pos),
+            Sprite {
+                image: blast_img.clone(),
+                ..default()
+            },
             Blast {
                 timer: Timer::from_seconds(1.2, TimerMode::Once),
                 velocity: projectile_dir * (player.current_speed + 150.0),
@@ -211,110 +213,42 @@ pub fn blast_update_system(
     }
 }
 
-/// Render player ship, blasts, screen-length rear orange firing lines, and clean non-intersecting forward launch arrows
-pub fn gizmo_render_system(
-    mut gizmos: Gizmos,
+/// Updates aim reticle sprite transform, rotation, and visibility based on player position & ammo count
+pub fn update_aim_reticle_system(
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform)>,
-    player_q: Query<(&Transform, &Player, Option<&InOrbit>)>,
-    blast_q: Query<&Transform, With<Blast>>,
-    bodies_q: Query<(Entity, &Transform, &GravitationalBody), Without<Player>>,
+    player_q: Query<(&Transform, &Player)>,
+    mut reticle_q: Query<(&mut Transform, &mut Visibility), (With<AimReticleSprite>, Without<Player>)>,
 ) {
     let cursor_world = get_cursor_world_pos(&windows, &camera_q);
 
-    // Draw player ship, targeting line, and post-shot movement arrow
-    for (transform, player, in_orbit) in player_q.iter() {
-        let pos = transform.translation.truncate();
-        let forward = (transform.rotation * Vec3::Y).truncate();
-        let right = (transform.rotation * Vec3::X).truncate();
+    if let Some((player_transform, player)) = player_q.iter().next() {
+        let player_pos = player_transform.translation.truncate();
 
-        // 1. Draw Player Spacecraft Triangle centered on transform origin (pos)
-        let tip = pos + forward * 7.0;
-        let rear = pos - forward * 7.0;
-        let left_wing = rear - right * 5.0;
-        let right_wing = rear + right * 5.0;
-
-        let color = if in_orbit.is_some() {
-            LinearRgba::rgb(0.2, 0.9, 1.0)
-        } else if player.disabled_gravity_body.is_some() {
-            LinearRgba::rgb(1.0, 0.8, 0.2) // Gold color when gravity immunity active
-        } else {
-            LinearRgba::rgb(0.0, 0.8, 0.5)
-        };
-
-        gizmos.line_2d(tip, left_wing, color);
-        gizmos.line_2d(left_wing, right_wing, color);
-        gizmos.line_2d(right_wing, tip, color);
-
-        // 2. Trajectory Launch Arrow (towards cursor, skipping ship body)
         let launch_dir = if let Some(target) = cursor_world {
-            let dir = (target - pos).normalize_or_zero();
-            if dir != Vec2::ZERO { dir } else { forward }
+            let dir = (target - player_pos).normalize_or_zero();
+            if dir != Vec2::ZERO {
+                dir
+            } else {
+                (player_transform.rotation * Vec3::Y).truncate()
+            }
         } else {
-            forward
+            (player_transform.rotation * Vec3::Y).truncate()
         };
 
-        let ship_radius_offset = 10.0; // Skip ship geometry visually
-        let total_arrow_dist = 28.0;   // Shorter arrow
-        let arrow_end = pos + launch_dir * total_arrow_dist;
-        let arrow_right = Vec2::new(-launch_dir.y, launch_dir.x);
-        let launch_color = LinearRgba::rgb(0.2, 1.0, 0.7);
-
-        // Draw dotted launch line skipping ship body
-        let dash_len = 4.0;
-        let gap_len = 3.0;
-        let step = dash_len + gap_len;
-        let mut d = ship_radius_offset;
-
-        while d < total_arrow_dist {
-            let d_end = (d + dash_len).min(total_arrow_dist);
-            let p1 = pos + launch_dir * d;
-            let p2 = pos + launch_dir * d_end;
-            gizmos.line_2d(p1, p2, launch_color);
-            d += step;
-        }
-
-        // Arrowhead fins at the end of forward launch line
-        let fin_left = arrow_end - launch_dir * 5.0 + arrow_right * 3.5;
-        let fin_right = arrow_end - launch_dir * 5.0 - arrow_right * 3.5;
-        gizmos.line_2d(arrow_end, fin_left, launch_color);
-        gizmos.line_2d(arrow_end, fin_right, launch_color);
-
-        // 3. Orange Dotted Rear Line (skipping ship body, extending away from cursor: 320 units)
-        let rear_dir = -launch_dir; // Away from cursor where blast fires
-        let total_rear_dist = 320.0; // Extends to edge of screen
-        let mut d_rear = ship_radius_offset; // Starts outside ship body
-        let orange_color = LinearRgba::rgb(1.0, 0.35, 0.2);
-
-        while d_rear < total_rear_dist {
-            let d_end = (d_rear + dash_len).min(total_rear_dist);
-            let p1 = pos + rear_dir * d_rear;
-            let p2 = pos + rear_dir * d_end;
-            gizmos.line_2d(p1, p2, orange_color);
-            d_rear += step;
-        }
-    }
-
-    // Draw blasts as glowing red circles
-    for transform in blast_q.iter() {
-        let pos = transform.translation.truncate();
-        gizmos.circle_2d(pos, 2.5, LinearRgba::rgb(1.0, 0.3, 0.2));
-    }
-
-    // Draw gravity objects and their pull radii
-    for (entity, transform, body) in bodies_q.iter() {
-        let pos = transform.translation.truncate();
-
-        // Check if any player has disabled this body
-        let is_disabled = player_q.iter().any(|(_, p, _)| p.disabled_gravity_body == Some(entity));
-
-        let pull_color = if is_disabled {
-            LinearRgba::rgb(0.5, 0.5, 0.5) // Dim gray pull field when pull disabled by blast
+        let angle = launch_dir.y.atan2(launch_dir.x) - std::f32::consts::FRAC_PI_2;
+        let target_visibility = if player.ammo == 0 {
+            Visibility::Hidden
         } else {
-            LinearRgba::rgb(0.3, 0.4, 0.8)
+            Visibility::Inherited
         };
 
-        gizmos.circle_2d(pos, body.pull_radius, pull_color);
-        gizmos.circle_2d(pos, body.body_radius, LinearRgba::rgb(0.9, 0.5, 0.2));
+        for (mut reticle_transform, mut visibility) in reticle_q.iter_mut() {
+            reticle_transform.translation = player_pos.extend(-0.05);
+            reticle_transform.rotation = Quat::from_rotation_z(angle);
+            if *visibility != target_visibility {
+                *visibility = target_visibility;
+            }
+        }
     }
 }

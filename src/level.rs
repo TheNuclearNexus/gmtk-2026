@@ -11,27 +11,92 @@ impl Plugin for LevelPlugin {
         app.add_systems(OnExit(GameState::Playing), cleanup_level_system);
         app.add_systems(
             Update,
-            (update_level_timer_system, check_victory_system, render_level_gizmos)
+            (update_level_timer_system, check_victory_system, update_pull_radius_sprite_system)
                 .run_if(in_state(GameState::Playing)),
         );
     }
 }
 
+fn spawn_planet(
+    commands: &mut Commands,
+    circle_assets: &mut ResMut<CircleAssets>,
+    images: &mut ResMut<Assets<Image>>,
+    pos: Vec2,
+    pull_radius: f32,
+    body_radius: f32,
+    gravity_force: f32,
+) {
+    let pull_img = circle_assets.get_or_create(images, pull_radius as u32, Palette::PLUM);
+    let body_img = circle_assets.get_or_create(images, body_radius as u32, Palette::MINT);
+
+    let planet_entity = commands
+        .spawn((
+            GravitationalBody {
+                pull_radius,
+                body_radius,
+                gravity_force,
+            },
+            Sprite {
+                image: body_img,
+                ..default()
+            },
+            Transform::from_translation(pos.extend(0.0)),
+            CelestialObject { is_hazard: true },
+        ))
+        .id();
+
+    commands.spawn((
+        PullRadiusSprite { body_entity: planet_entity },
+        Sprite {
+            image: pull_img,
+            ..default()
+        },
+        Transform::from_translation(pos.extend(-0.1)),
+    ));
+}
+
+fn spawn_goal_zone(
+    commands: &mut Commands,
+    circle_assets: &CircleAssets,
+    pos: Vec2,
+) {
+    commands.spawn((
+        GoalZone,
+        Sprite {
+            image: circle_assets.goal_zone.clone(),
+            ..default()
+        },
+        Transform::from_translation(pos.extend(0.0)),
+    ));
+}
+
 /// Spawns player, planets/asteroids, victory goal beacon, and sets countdown timer
 pub fn setup_level_system(
     mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut circle_assets: ResMut<CircleAssets>,
+    mut images: ResMut<Assets<Image>>,
     mut level_info: ResMut<LevelInfo>,
 ) {
-    if level_info.total_levels == 0 {
-        level_info.total_levels = 3;
+    if circle_assets.goal_zone == Handle::default() {
+        circle_assets.goal_zone = create_goal_zone_image(&mut images);
+    }
+    if circle_assets.aim_reticle == Handle::default() {
+        circle_assets.aim_reticle = create_aim_reticle_image(&mut images);
+    }
+
+    level_info.total_levels = 5;
+    if level_info.current_level == 0 {
         level_info.current_level = 1;
     }
 
-    // Set countdown timer duration per level
-    let time_limit = match level_info.current_level {
-        1 => 18.0,
-        2 => 22.0,
-        _ => 25.0,
+    // Set countdown timer and ammo limits per level
+    let (time_limit, initial_ammo, start_pos) = match level_info.current_level {
+        1 => (12.0, 5, Vec2::new(-120.0, -120.0)),
+        2 => (14.0, 6, Vec2::new(-140.0, 0.0)),
+        3 => (12.0, 6, Vec2::new(0.0, -140.0)),
+        4 => (14.0, 7, Vec2::new(-140.0, -140.0)),
+        _ => (16.0, 8, Vec2::new(-150.0, -150.0)),
     };
 
     level_info.initial_time = time_limit;
@@ -40,102 +105,79 @@ pub fn setup_level_system(
     // Spawn Player
     commands.spawn((
         Player {
-            ammo: 6 + level_info.current_level * 2,
-            max_ammo: 6 + level_info.current_level * 2,
-            turn_speed: 2.0,
-            base_speed: 85.0,
-            current_speed: 85.0,
+            ammo: initial_ammo,
+            max_ammo: initial_ammo,
+            turn_speed: 2.4,
+            base_speed: 135.0,
+            current_speed: 135.0,
             disabled_gravity_body: None,
             tilt: 0.0,
         },
-        Transform::from_xyz(-120.0, -120.0, 0.0),
+        Sprite {
+            image: asset_server.load("ship.png"),
+            custom_size: Some(Vec2::new(25.0, 25.0)),
+            ..default()
+        },
+        Transform::from_translation(start_pos.extend(0.0)),
     ));
 
-    // Spawn Level-specific celestial bodies (asteroids / planets)
+    // Spawn Aim Reticle sprite
+    commands.spawn((
+        AimReticleSprite,
+        Sprite {
+            image: circle_assets.aim_reticle.clone(),
+            ..default()
+        },
+        Transform::from_translation(start_pos.extend(-0.05)),
+    ));
+
+    // Spawn Level-specific celestial bodies (asteroids / planets) and Goal Zone
     match level_info.current_level {
         1 => {
-            // Level 1: One main central gravitational planet
-            commands.spawn((
-                GravitationalBody {
-                    pull_radius: 50.0,
-                    body_radius: 18.0,
-                    gravity_force: 40.0,
-                },
-                Transform::from_xyz(0.0, 0.0, 0.0),
-                CelestialObject { is_hazard: true },
-            ));
-
-            // Goal beacon at top right
-            commands.spawn((
-                GoalZone,
-                Transform::from_xyz(120.0, 120.0, 0.0),
-            ));
+            // Level 1: Launch & Basic Thrust. 1 small planet off-path.
+            spawn_planet(&mut commands, &mut circle_assets, &mut images, Vec2::new(40.0, -40.0), 50.0, 16.0, 16.0);
+            spawn_goal_zone(&mut commands, &circle_assets, Vec2::new(150.0, 150.0));
         }
         2 => {
-            // Level 2: Two orbiting planets forming a gravitational binary field
-            commands.spawn((
-                GravitationalBody {
-                    pull_radius: 42.0,
-                    body_radius: 15.0,
-                    gravity_force: 35.0,
-                },
-                Transform::from_xyz(-45.0, 20.0, 0.0),
-                CelestialObject { is_hazard: true },
-            ));
-
-            commands.spawn((
-                GravitationalBody {
-                    pull_radius: 45.0,
-                    body_radius: 16.0,
-                    gravity_force: 38.0,
-                },
-                Transform::from_xyz(45.0, -20.0, 0.0),
-                CelestialObject { is_hazard: true },
-            ));
-
-            // Goal beacon at top center
-            commands.spawn((
-                GoalZone,
-                Transform::from_xyz(0.0, 130.0, 0.0),
-            ));
+            // Level 2: Gravitational Slingshot. Single medium planet directly in path.
+            spawn_planet(&mut commands, &mut circle_assets, &mut images, Vec2::new(20.0, 0.0), 60.0, 18.0, 18.0);
+            spawn_goal_zone(&mut commands, &circle_assets, Vec2::new(190.0, 0.0));
+        }
+        3 => {
+            // Level 3: Orbital Alignment Speed Boost. Heavy center planet.
+            spawn_planet(&mut commands, &mut circle_assets, &mut images, Vec2::new(0.0, 0.0), 70.0, 20.0, 20.0);
+            spawn_goal_zone(&mut commands, &circle_assets, Vec2::new(-160.0, 160.0));
+        }
+        4 => {
+            // Level 4: Gravity Stun. Massive planet blocking goal entrance.
+            spawn_planet(&mut commands, &mut circle_assets, &mut images, Vec2::new(40.0, 40.0), 80.0, 24.0, 22.0);
+            spawn_goal_zone(&mut commands, &circle_assets, Vec2::new(180.0, 180.0));
         }
         _ => {
-            // Level 3: Asteroid field challenge
-            commands.spawn((
-                GravitationalBody {
-                    pull_radius: 35.0,
-                    body_radius: 12.0,
-                    gravity_force: 30.0,
-                },
-                Transform::from_xyz(-60.0, 50.0, 0.0),
-                CelestialObject { is_hazard: true },
-            ));
+            // Level 5: Chain Slingshot Challenge. 3 planets linked with gentle, controllable gravity (14.0, 12.0, 14.0).
+            spawn_planet(&mut commands, &mut circle_assets, &mut images, Vec2::new(-50.0, -30.0), 55.0, 16.0, 14.0);
+            spawn_planet(&mut commands, &mut circle_assets, &mut images, Vec2::new(50.0, 55.0), 60.0, 18.0, 12.0); // Gentle 12.0 gravity!
+            spawn_planet(&mut commands, &mut circle_assets, &mut images, Vec2::new(155.0, 140.0), 55.0, 16.0, 14.0);
+            spawn_goal_zone(&mut commands, &circle_assets, Vec2::new(235.0, 215.0));
+        }
+    }
+}
 
-            commands.spawn((
-                GravitationalBody {
-                    pull_radius: 50.0,
-                    body_radius: 20.0,
-                    gravity_force: 45.0,
-                },
-                Transform::from_xyz(0.0, -10.0, 0.0),
-                CelestialObject { is_hazard: true },
-            ));
+/// Updates pull radius sprite texture when player disables a body's gravity
+pub fn update_pull_radius_sprite_system(
+    mut circle_assets: ResMut<CircleAssets>,
+    mut images: ResMut<Assets<Image>>,
+    player_q: Query<&Player>,
+    bodies_q: Query<(Entity, &GravitationalBody)>,
+    mut pull_sprite_q: Query<(&PullRadiusSprite, &mut Sprite)>,
+) {
+    let disabled_body = player_q.iter().find_map(|p| p.disabled_gravity_body);
 
-            commands.spawn((
-                GravitationalBody {
-                    pull_radius: 35.0,
-                    body_radius: 12.0,
-                    gravity_force: 30.0,
-                },
-                Transform::from_xyz(60.0, 60.0, 0.0),
-                CelestialObject { is_hazard: true },
-            ));
-
-            // Goal beacon at far top-right
-            commands.spawn((
-                GoalZone,
-                Transform::from_xyz(125.0, 125.0, 0.0),
-            ));
+    for (pull_sprite, mut sprite) in pull_sprite_q.iter_mut() {
+        if let Ok((body_entity, body)) = bodies_q.get(pull_sprite.body_entity) {
+            let is_disabled = disabled_body == Some(body_entity);
+            let color = if is_disabled { Palette::SLATE } else { Palette::PLUM };
+            sprite.image = circle_assets.get_or_create(&mut images, body.pull_radius as u32, color);
         }
     }
 }
@@ -159,10 +201,19 @@ pub fn cleanup_level_system(
     mut commands: Commands,
     player_q: Query<Entity, With<Player>>,
     bodies_q: Query<Entity, With<GravitationalBody>>,
+    pull_sprites_q: Query<Entity, With<PullRadiusSprite>>,
+    reticle_q: Query<Entity, With<AimReticleSprite>>,
     goal_q: Query<Entity, With<GoalZone>>,
     blast_q: Query<Entity, With<Blast>>,
 ) {
-    for e in player_q.iter().chain(bodies_q.iter()).chain(goal_q.iter()).chain(blast_q.iter()) {
+    for e in player_q
+        .iter()
+        .chain(bodies_q.iter())
+        .chain(pull_sprites_q.iter())
+        .chain(reticle_q.iter())
+        .chain(goal_q.iter())
+        .chain(blast_q.iter())
+    {
         commands.entity(e).despawn();
     }
 }
@@ -178,7 +229,8 @@ pub fn check_victory_system(
         let p_pos = player_transform.translation.truncate();
         for goal_transform in goal_q.iter() {
             let g_pos = goal_transform.translation.truncate();
-            if p_pos.distance(g_pos) <= 16.0 {
+            // Victory condition (16.0px goal zone radius + 10.0px ship texture hitbox radius)
+            if p_pos.distance(g_pos) <= 26.0 {
                 level_info.last_remaining_time = level_info.level_timer;
                 if level_info.current_level < level_info.total_levels {
                     level_info.current_level += 1;
@@ -187,18 +239,5 @@ pub fn check_victory_system(
                 return;
             }
         }
-    }
-}
-
-/// Render Goal Zone as a green glowing portal/beacon gizmo
-pub fn render_level_gizmos(
-    mut gizmos: Gizmos,
-    goal_q: Query<&Transform, With<GoalZone>>,
-) {
-    for transform in goal_q.iter() {
-        let pos = transform.translation.truncate();
-        gizmos.circle_2d(pos, 16.0, LinearRgba::rgb(0.2, 1.0, 0.3));
-        gizmos.circle_2d(pos, 10.0, LinearRgba::rgb(0.4, 1.0, 0.5));
-        gizmos.circle_2d(pos, 4.0, LinearRgba::rgb(0.8, 1.0, 0.9));
     }
 }
