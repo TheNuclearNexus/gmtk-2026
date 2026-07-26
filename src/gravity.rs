@@ -100,8 +100,7 @@ pub fn orbit_entry_system(
     }
 }
 
-/// Controls orbital physics based on Conservation of Angular Momentum (L = r * v_tan = const)
-/// Steering (A/D) adjusts radial position: approaching center speeds up orbit, moving outward slows down
+/// Controls orbital physics with rotational torque force aligning ship facing tangent to the orbit
 pub fn orbital_movement_system(
     mut commands: Commands,
     keyboard_input: Res<ButtonInput<KeyCode>>,
@@ -115,25 +114,39 @@ pub fn orbital_movement_system(
         if let Ok((body_transform, body_data)) = bodies_q.get(orbit.body_entity) {
             let body_pos = body_transform.translation.truncate();
 
-            // A / D steering turns the ship
-            let mut rotation_amount = 0.0;
+            // Target tangent heading vector in orbit
+            let tangent_heading = Vec2::new(-orbit.angle.sin(), orbit.angle.cos()) * orbit.angular_momentum.signum();
+            let target_tangent_z = tangent_heading.y.atan2(tangent_heading.x) - std::f32::consts::FRAC_PI_2;
+
+            // Apply a smooth rotational force to align ship heading towards orbital tangent
+            let current_z = player_transform.rotation.to_euler(EulerRot::ZYX).0;
+            let current_base_z = current_z - player.tilt;
+
+            let mut angle_diff = target_tangent_z - current_base_z;
+            while angle_diff > std::f32::consts::PI { angle_diff -= std::f32::consts::TAU; }
+            while angle_diff < -std::f32::consts::PI { angle_diff += std::f32::consts::TAU; }
+
+            // Rotational alignment force towards orbital tangent
+            let alignment_force = angle_diff * (6.0 * dt).min(1.0);
+
+            // Manual A / D steering torque input
+            let mut manual_rotation = 0.0;
             let mut target_tilt = 0.0;
 
             if keyboard_input.pressed(KeyCode::KeyA) {
-                rotation_amount += player.turn_speed * dt;
+                manual_rotation += player.turn_speed * dt;
                 target_tilt += 0.35;
             }
             if keyboard_input.pressed(KeyCode::KeyD) {
-                rotation_amount -= player.turn_speed * dt;
+                manual_rotation -= player.turn_speed * dt;
                 target_tilt -= 0.35;
             }
 
             // Smooth visual tilt
             player.tilt += (target_tilt - player.tilt) * (12.0 * dt).min(1.0);
 
-            // Extract heading rotation
-            let current_z = player_transform.rotation.to_euler(EulerRot::ZYX).0;
-            let base_heading = current_z - player.tilt + rotation_amount;
+            // Apply base heading update incorporating rotational alignment force and manual steering
+            let base_heading = current_base_z + alignment_force + manual_rotation;
             player_transform.rotation = Quat::from_rotation_z(base_heading + player.tilt);
 
             // Ship facing vector
